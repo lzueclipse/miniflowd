@@ -11,6 +11,8 @@ Building miniflowd should be as simple as typing:
 
 yum install libpcap-devel g++
 
+g++ -o miniflowd miniflowd.cpp
+
 ./miniflowd -i eno16777984 -D
 
 #elasticsearch 
