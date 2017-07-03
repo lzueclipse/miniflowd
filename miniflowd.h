@@ -31,15 +31,8 @@
 #include <syslog.h>
 #include <time.h>
 
-#if defined(HAVE_NET_BPF_H)
-#include <net/bpf.h>
-#elif defined(HAVE_PCAP_BPF_H)
-#include <pcap-bpf.h>
-#endif
-#if defined(HAVE_INTTYPES_H)
 #include <inttypes.h>
-#endif
-
+#include <pcap.h>
 
 /*
  * Capture length for libpcap: Must fit the link layer header, plus 
