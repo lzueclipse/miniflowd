@@ -1,10 +1,11 @@
 #ifndef _MINIFLOWD_H
 #define _MINIFLOWD_H
 
+#include <list>
 #include <set>
-#include <map>
 #include <string>
 #include <sstream>
+#include <iostream>
 
 #include <sys/ioctl.h>
 #include <sys/poll.h>
@@ -55,6 +56,21 @@
 #define DEFAULT_MAXIMUM_LIFETIME	(3600*24*7)
 #define DEFAULT_EXPIRY_INTERVAL		60
 
+//expire reason
+enum REASON
+{ 
+	R_GENERAL, 
+	R_TCP, 
+	R_TCP_RST, 
+	R_TCP_FIN, 
+	R_UDP, 
+	R_ICMP, 
+	R_MAXLIFE, 
+	R_OVERBYTES, 
+	R_OVERFLOWS, 
+	R_FLUSH
+};
+
 /*
  * This structure is an entry in the tree of flows that we are 
  * currently tracking. 
@@ -81,28 +97,43 @@ struct Flow
 	uint64_t octets[2];			/* Octets so far */
 	uint64_t packets[2];			/* Packets so far */
 
-        uint32_t expiresAt;                   /* time_t */
-};
-/*
- * Flow compare algrithom
- */
-struct FlowCompare
-{
-	bool operator()(const struct Flow & left, const struct Flow & right) const
-	{
-		/* Be careful to avoid signed vs unsigned issues here */
-	        if (left.expiresAt != right.expiresAt)
+        uint32_t expiresAt;          	         /* time_t */
+	REASON   reason;			 /*Expire reason*/
+
+	bool operator==( const Flow &other ) const
+    	{
+        	if (this->af != other.af)
 		{
-        	        return (left.expiresAt > right.expiresAt);
+                	return false;
 		}
 
-        	/* Make expiry entries unique by comparing flow sequence */
-        	if (left.flowSeq != right.flowSeq)
+		if (memcmp(&(this->addr[0]), &(other.addr[0]), sizeof(this->addr[0])) != 0)
 		{
-                	return (left.flowSeq > right.flowSeq);
+			return false;
 		}
-	
-	}
+
+		if (memcmp(&(this->addr[1]), &(other.addr[1]), sizeof(this->addr[1])) != 0)
+		{
+			return false;
+		}
+
+        	if (this->protocol != other.protocol)
+		{
+			return false;
+		}
+		
+		if (this->port[0] != other.port[0])
+		{
+			return false;
+		}
+
+        	if (this->port[1] != other.port[1])
+		{
+			return false;
+		}
+
+		return true;
+    	}
 };
 
 /*
@@ -113,36 +144,12 @@ struct FlowCompare
 struct FlowTrack 
 {
 	/* The flows and their expiry events */
-	std::map<std::string, struct Flow> flowsMap;	/* flow set */
-	std::set<struct Flow, FlowCompare> expiriesSet;	/* expiries set */
+	std::list<Flow> flowsList;	/* flow list */
+	std::list<Flow> expiresList;	/* expiries list */
 
 	uint64_t nextFlowSeq;		/* Next flow ID */
-
-	/* Flow timeouts */
-	int tcpTimeout;			/* Open TCP connections */
-	int tcpRstTimeout;		/* TCP flows after RST */
-	int tcpFinTimeout;		/* TCP flows after bidi FIN */
-	int udpTimeout;			/* UDP flows */
-	int icmpTimeout;		/* ICMP flows */
-	int generalTimeout;		/* Everything else */
-	int maximumLifetime;		/* Maximum life for flows */
-	int expiryInterval;		/* Interval between expiries */ 
 };
 
-
-enum REASON
-{ 
-	R_GENERAL, 
-	R_TCP, 
-	R_TCP_RST, 
-	R_TCP_FIN, 
-	R_UDP, 
-	R_ICMP, 
-	R_MAXLIFE, 
-	R_OVERBYTES, 
-	R_OVERFLOWS, 
-	R_FLUSH
-};
 
 /* Describes a datalink header and how to extract v4/v6 frames from it */
 struct DataLinkType
