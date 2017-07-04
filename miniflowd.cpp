@@ -1,7 +1,16 @@
 #include "miniflowd.h"
 
-static int verbose_flag = 0;            /* Debugging flag */
+static int verboseFlag = 0;            /* Debugging flag */
 
+
+/* Datalink types that we care about */
+static const struct DataLinkType lt[] = 
+{
+	//Normal Ethenet
+	{ DLT_EN10MB,	14, 12,  2,  1, 0xffffffff,  0x0800,   0x86dd },
+	//Linux cooked, "any interfaces"
+	{ DLT_LINUX_SLL,16, 14,  2,  1, 0xffffffff,  0x0800,   0x86dd },
+};
 
 /* Display commandline usage information */
 static void usage(void)
@@ -28,49 +37,35 @@ static void usage(void)
 	    DEFAULT_EXPIRY_INTERVAL);
 }
 
-static void setup_packet_capture(struct pcap **pcap, int *linktype, char *dev)
+static void setupPacketCapture(struct pcap **pCap, int *linkType)
 {
-	char ebuf[PCAP_ERRBUF_SIZE];
-	uint32_t bpf_mask, bpf_net;
+	char eBuf[PCAP_ERRBUF_SIZE];
 
-	/* Open pcap */
-	if (dev != NULL) 
+	/* Open pcap, all interfaces... */
+	if ((*pCap = pcap_open_live(NULL, LIBPCAP_SNAPLEN_V4, 1, 0, eBuf)) == NULL) 
 	{
-		if ((*pcap = pcap_open_live(dev, LIBPCAP_SNAPLEN_V4, 1, 0, ebuf)) == NULL) 
-		{
-			fprintf(stderr, "pcap_open_live: %s\n", ebuf);
-			exit(1);
-		}
-		if (pcap_lookupnet(dev, &bpf_net, &bpf_mask, ebuf) == -1)
-			bpf_net = bpf_mask = 0;
-	}
-	*linktype = pcap_datalink(*pcap);
-	if (datalink_check(*linktype, NULL, 0, NULL) == -1) {
-		fprintf(stderr, "Unsupported datalink type %d\n", *linktype);
+		fprintf(stderr, "pcap_open_live: %s\n", eBuf);
 		exit(1);
 	}
-
-#ifdef BIOCLOCK
-	/*
-	 * If we are reading from an device (not a file), then 
-	 * lock the underlying BPF device to prevent changes in the 
-	 * unprivileged child
-	 */
-	if (dev != NULL && ioctl(pcap_fileno(*pcap), BIOCLOCK) < 0) {
-		fprintf(stderr, "ioctl(BIOCLOCK) failed: %s\n",
-		    strerror(errno));
+	*linkType = pcap_datalink(*pCap);
+	//Only support Normal Ethernet, Linux cooked sockets(any interfaces)
+	if (*linkType != DLT_LINUX_SLL && *linkType != DLT_EN10MB)
+	{
+		fprintf(stderr, "Unsupported datalink type %d\n", *linkType);
 		exit(1);
 	}
-#endif
+	if(verboseFlag)
+	{
+		fprintf(stdout, "linkType = %s\n", (*linkType == DLT_LINUX_SLL)?"DLT_LINUX_SLL":"DLT_EN10MB");
+	}
 }
 
 int main (int argc, char **argv)
 {
 	int ch;
-	pcap_t *pcap = NULL;
-	char *dev;
-	int linktype, ret;
-	while ((ch = getopt(argc, argv, "hD:i:")) != -1) 
+	pcap_t *pCap = NULL;
+	int linkType, ret;
+	while ((ch = getopt(argc, argv, "hD")) != -1) 
 	{
 		switch (ch) 
 		{
@@ -78,12 +73,7 @@ int main (int argc, char **argv)
 			usage();
 			return (0);
 		case 'D':
-			verbose_flag = 1;
-			/* FALLTHROUGH */
-		case 'i':
-			dev = strsep(&optarg, ":");
-			if (verbose_flag)
-				fprintf(stderr, "Using %s \n", dev);
+			verboseFlag = 1;
 			break;
 		default:
 			fprintf(stderr, "Invalid commandline option.\n");
@@ -93,10 +83,9 @@ int main (int argc, char **argv)
 	}
 
 	/* Will exit on failure */
-	setup_packet_capture(&pcap, &linktype, dev);
+	setupPacketCapture(&pCap, &linkType);
 	
-	pcap_close(pcap);
+	pcap_close(pCap);
 	
 	return(ret == 0 ? 0 : 1);
 }
-	
