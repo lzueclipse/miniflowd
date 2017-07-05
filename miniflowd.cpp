@@ -1,10 +1,11 @@
 #include "miniflowd.h"
 
+
 static int verboseFlag = 0;            /* Debugging flag */
 
 
 /* Datalink types that we care about */
-static const struct DataLinkType lt[] = 
+static const struct DataLinkType dataLinkTypeArray[] = 
 {
 	//Normal Ethenet
 	{ DLT_EN10MB,	14, 12,  2,  1, 0xffffffff,  0x0800,   0x86dd },
@@ -61,7 +62,7 @@ static void setupPacketCapture(struct pcap **pCap, int *linkType)
 }
 
 /*
- * Flow compare algrithom
+ * Expired Flow compare algrithom
  */
 bool ExpiresCompare(const Flow &left, const Flow &right)
 {
@@ -89,50 +90,350 @@ static int nextExpire(FlowTrack *flowTrack)
 	
 	gettimeofday(&now, NULL);
 
-	if((flowTrack->expiresList).size() == 0)
+	if((flowTrack->flowsList).size() == 0)
+	{
 		return (-1); /* indefinite */
+	}
 
 	//sort
-	(flowTrack->expiresList).sort(ExpiresCompare);
+	(flowTrack->flowsList).sort(ExpiresCompare);
 
-	expire = (flowTrack->expiresList).front();
+	expire = (flowTrack->flowsList).front();
 	
 	expiresAt = expire.expiresAt;
 
 	/* Don't cluster urgent expiries */
 	if (expiresAt == 0 && (expire.reason == R_OVERBYTES || expire.reason == R_OVERFLOWS || expire.reason == R_FLUSH))
+	{
 		return (0); /* Now */
+	}
 
 	/* Cluster expiries*/
 	if ((fudge = expiresAt % DEFAULT_EXPIRY_INTERVAL) > 0)
+	{
 		expiresAt += DEFAULT_EXPIRY_INTERVAL - fudge;
+	}
 
 	if (expiresAt < now.tv_sec)
+	{
 		return (0); /* Now */
+	}
 
 	ret = 999 + (expiresAt - now.tv_sec) * 1000;
+	if(verboseFlag)
+	{
+		fprintf(stdout, "nextExpire time = %u", ret );
+	}
 	return (ret);
 }
 
+/*
+ * Figure out how many bytes to skip from front of packet to get past 
+ * datalink headers. If pkt is specified, also check whether determine
+ * whether or not it is one that we are interested in (IPv4 or IPv6 for now)
+ *
+ * Returns number of bytes to skip or -1 to indicate that entire 
+ * packet should be skipped
+ */
+static int dataLinkCheck(int linkType, const uint8_t *pkt, uint32_t capLen, int *af)
+{
+	int i, j;
+	uint32_t frameType;
+	DataLinkType *tmpType = NULL;
+		
+	for (i = 0; i< (sizeof(dataLinkTypeArray)/sizeof(DataLinkType)); i++)
+	{
+		if (dataLinkTypeArray[i].dataLinkType == linkType)
+		{
+			tmpType = (DataLinkType *)&(dataLinkTypeArray[i]);
+		}
+	}
+
+	if(tmpType == NULL)
+	{
+		fprintf(stderr, "tmpType is NULL\n");
+		return (-1);
+	}
+	if (pkt == NULL)
+	{
+		fprintf(stderr, "pkt is NULL\n");
+		return (-1);
+	}
+	if (capLen <= tmpType->skipLen)
+	{
+		fprintf(stderr, "capLen is to short\n");
+		return (-1);
+	}
+
+	/* Suck out the frametype */
+	frameType = 0;
+	if (tmpType->frameTypeBigEndian) 
+	{
+		for (j = 0; j < tmpType->frameTypeLen; j++) 
+		{
+			frameType <<= 8;
+			frameType |= pkt[j + tmpType->frameTypeOffset];
+		}
+	} else {
+		for (j = tmpType->frameTypeLen - 1; j >= 0 ; j--) {
+			frameType <<= 8;
+			frameType |= pkt[j + tmpType->frameTypeOffset];
+		}
+	}
+	frameType &= tmpType->frameTypeMask;
+
+	if (frameType == tmpType->frameTypeV4)
+		*af = AF_INET;
+	else if (frameType == tmpType->frameTypeV4)
+		*af = AF_INET6;
+	else
+	{
+		return (-1);
+	}
+	
+	//jump to IP header
+	return (tmpType->skipLen);
+}
+
+/* Fill in transport-layer (tcp/udp) portions of flow record */
+static int
+tcpUdpToFlow(Flow *flow, const uint8_t *pkt, const size_t capLen, int isFrag, int protocol, int ndx)
+{
+	const struct tcphdr *tcp = (const struct tcphdr *)pkt;
+	const struct udphdr *udp = (const struct udphdr *)pkt;
+	const struct icmp *icmp = (const struct icmp *)pkt;
+
+	/*
+	 * XXX to keep flow in proper canonical format, it may be necessary to
+	 * swap the array slots based on the order of the port numbers does
+	 * this matter in practice??? I don't think so - return flows will
+	 * always match, because of their symmetrical addr/ports
+	 */
+
+	switch (protocol) 
+	{
+	case IPPROTO_TCP:
+		/* Check for runt packet, but don't error out on short frags */
+		if (capLen < sizeof(*tcp))
+		{
+			return (isFrag ? 0 : -1);
+		}
+		flow->port[ndx] = tcp->source;
+		flow->port[ndx ^ 1] = tcp->dest;
+		flow->tcpRst[ndx] = tcp->rst;
+		flow->tcpFin[ndx] = tcp->fin;
+		break;
+	case IPPROTO_UDP:
+		/* Check for runt packet, but don't error out on short frags */
+		if (capLen < sizeof(*udp))
+		{
+			return (isFrag ? 0 : -1);
+		}
+		flow->port[ndx] = udp->source;
+		flow->port[ndx ^ 1] = udp->dest;
+		break;
+	case IPPROTO_ICMP:
+		/*
+		 * Encode ICMP type * 256 + code into dest port like
+		 * Cisco routers
+		 */
+		flow->port[ndx] = 0;
+		flow->port[ndx ^ 1] = htons(icmp->icmp_type * 256 +
+		    icmp->icmp_code);
+		break;
+	}
+	return (0);
+}
+
+/* Convert a IPv4 packet to a partial flow record (used for comparison) */
+static int ipv4ToFlow(Flow *flow, const uint8_t *pkt, size_t capLen, size_t len, int *isfrag, int af)
+{
+	const struct ip *ip = (const struct ip *)pkt;
+	int ndx;
+	int ret;
+
+	//IP header length unit: 4 Bytes
+	if (capLen < 20 || capLen < ip->ip_hl * 4)
+	{
+		return (-1);	/* Runt packet */
+	}
+	if (ip->ip_v != 4)
+	{
+		return (-1);	/* Unsupported IP version */
+	}
+	
+	/* Prepare to store flow in canonical format */
+	ndx = memcmp(&ip->ip_src, &ip->ip_dst, sizeof(ip->ip_src)) > 0 ? 1 : 0;
+	
+	flow->af = af;
+	flow->addr[ndx] = ip->ip_src;
+	flow->addr[ndx ^ 1] = ip->ip_dst;
+	flow->protocol = ip->ip_p;
+	flow->octets[ndx] = len;
+	flow->packets[ndx] = 1;
+
+	*isfrag = (ntohs(ip->ip_off) & (IP_OFFMASK|IP_MF)) ? 1 : 0;
+
+	/* if not first fragment, there is no TCP/UDP header */
+	/* Don't try to examine higher level headers if not first fragment */
+	if (*isfrag && (ntohs(ip->ip_off) & IP_OFFMASK) != 0)
+	{
+		return (0);
+	}
+
+	//IP header length unit: 4 Bytes
+	ret = tcpUdpToFlow(flow, pkt + (ip->ip_hl * 4), capLen - (ip->ip_hl * 4), *isfrag, ip->ip_p, ndx);
+	return ret;
+}
+
+static const char * protocolToStr(uint8_t protocol)
+{
+	static char protobuf[64];
+	memset(protobuf, 0, sizeof(protobuf));
+	
+	if(protocol == IPPROTO_IP)
+	{
+		strcat(protobuf, "IP");
+	}
+	else if(protocol == IPPROTO_TCP)
+	{
+		strcat(protobuf, "TCP");
+	}
+	else if(protocol == IPPROTO_ICMP)
+	{
+		strcat(protobuf, "ICMP");
+	}
+	else if(protocol == IPPROTO_UDP)
+	{
+		strcat(protobuf, "UDP");
+	}
+	else if(protocol == IPPROTO_IGMP)
+	{
+		strcat(protobuf, "IGMP");
+	}
+	else if(protocol == IPPROTO_IPV6)
+	{
+		strcat(protobuf, "IPV6");
+	}
+	else if(protocol == IPPROTO_GRE)
+	{
+		strcat(protobuf, "GRE");
+	}
+	else if(protocol == IPPROTO_ICMPV6)
+	{
+		strcat(protobuf, "ICMPV6");
+	}
+	else 
+	{
+		strcat(protobuf, "OTHERS");
+	}
+	return protobuf;
+}
+
+/* Format a flow in a brief way */
+static const char * formatFlowBrief(Flow *flow)
+{
+	char addr1[64], addr2[64];
+	static char buf[1024];
+
+	inet_ntop(flow->af, &flow->addr[0], addr1, sizeof(addr1));
+	inet_ntop(flow->af, &flow->addr[1], addr2, sizeof(addr2));
+	snprintf(buf, sizeof(buf), "seq:%" PRIu64 " [%s]:%hu <> [%s]:%hu proto:%u, %s",
+	    flow->flowSeq,
+	    addr1, ntohs(flow->port[0]), addr2, ntohs(flow->port[1]),
+	    (int)flow->protocol, protocolToStr(flow->protocol));
+	
+	return (buf);
+}
+
+/*
+ * Main per-packet processing function. Take a packet (provided by 
+ * libpcap) and attempt to find a matching flow. If no such flow exists, 
+ * then create one. 
+ *
+ * Also marks flows for fast expiry, based on flow or packet attributes
+ * (the actual expiry is performed elsewhere)
+ */
+static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const u_int32_t capLen, const uint32_t len, 
+    const struct timeval *receivedTime)
+{
+	Flow tmpFlow;
+	int frag;
+	int ret;
+	bool found;
+
+	/* Convert the IP packet to a flow identity */
+	if(af == AF_INET) 
+	{	
+		//IPv4
+		ret = ipv4ToFlow(&tmpFlow, pkt, capLen, len, &frag, af);
+	}
+
+	std::list<Flow>::iterator it = flowTrack->flowsList.begin();
+	for(; it!=flowTrack->flowsList.end(); ++it)
+	{
+		//operator ==
+		if( (*it) == tmpFlow)
+		{
+			found = true;
+			break;
+		}
+	}
+
+	/* If a matching flow does not exist, create and insert one */
+	if(!found)
+	{
+		memcpy(&(tmpFlow.flowStart), receivedTime, sizeof(tmpFlow.flowStart));
+		tmpFlow.flowSeq = flowTrack->nextFlowSeq++;
+		if (verboseFlag)
+		{
+			fprintf(stdout, "Add Flow %s\n", formatFlowBrief(&tmpFlow));
+		}
+		memcpy(&(tmpFlow.flowLast), receivedTime, sizeof(tmpFlow.flowLast));
+		/* Must be non-zero (0 means expire immediately) */
+		tmpFlow.expiresAt = 1;
+		tmpFlow.reason = R_GENERAL;
+		flowTrack->flowsList.push_back(tmpFlow);
+	}
+	else
+	{
+		/* Update flow statistics */
+		it->packets[0] += tmpFlow.packets[0];
+		it->octets[0] += tmpFlow.octets[0];
+		it->tcpFin[0] = tmpFlow.tcpFin[0];
+		it->tcpRst[0] = tmpFlow.tcpRst[0];
+
+		it->packets[1] += tmpFlow.packets[1];
+		it->octets[1] += tmpFlow.octets[1];
+		it->tcpFin[1] = tmpFlow.tcpFin[1];
+		it->tcpRst[1] = tmpFlow.tcpRst[1];
+		memcpy(&(it->flowLast), receivedTime, sizeof(it->flowLast));
+	}
+	
+	return 0;
+}
 /*
  * Per-packet callback function from libpcap. Pass the packet (if it is IP)
  * sans datalink headers to processPacket.
  */
 static void flowCallBack(uint8_t *userData, const struct pcap_pkthdr* phdr, const uint8_t *pkt)
 {
-	int s, af;
-	int linkType = (int)*userData;
+	int ret, af;
 	struct timeval tv;
+	FlowTrack *flowTrack = (FlowTrack *)userData;
 
-	s = datalink_check(cb_ctxt->linktype, pkt, phdr->caplen, &af);
-	if (s < 0 || (!cb_ctxt->want_v6 && af == AF_INET6)) {
-		cb_ctxt->ft->non_ip_packets++;
-	} else {
+	ret = dataLinkCheck(flowTrack->linkType, pkt, phdr->caplen, &af);
+	if (ret < 0 || af == AF_INET6) 
+	{
+		//IPv6 not support for now
+	}
+	else 
+	{	
+		//IPv4
 		tv.tv_sec = phdr->ts.tv_sec;
 		tv.tv_usec = phdr->ts.tv_usec;
-		if (process_packet(cb_ctxt->ft, pkt + s, af,
-		    phdr->caplen - s, phdr->len - s, &tv) == PP_MALLOC_FAIL)
-			cb_ctxt->fatal = 1;
+		//Skip Data link header
+		ret = processPacket(flowTrack, pkt + ret, af, phdr->caplen - ret, phdr->len - ret, &tv);
 	}
 }
 
@@ -140,10 +441,9 @@ int main (int argc, char **argv)
 {
 	int ch;
 	pcap_t *pCap = NULL;
-	int linkType, ret;
+	int ret;
+	static FlowTrack flowTrack;
 	struct pollfd pollFd[1];
-	FlowTrack flowTrack;
-
 	while ((ch = getopt(argc, argv, "hD")) != -1) 
 	{
 		switch (ch) 
@@ -162,7 +462,7 @@ int main (int argc, char **argv)
 	}
 
 	/* Will exit on failure */
-	setupPacketCapture(&pCap, &linkType);
+	setupPacketCapture(&pCap, &(flowTrack.linkType));
 	
 	while(1)
 	{
@@ -180,7 +480,7 @@ int main (int argc, char **argv)
 		/* If we have data, run it through libpcap */
 		if(pollFd[0].revents != 0) 
 		{
-			ret = pcap_dispatch(pCap, -1, flowCallBack,(void*)&linkType);
+			ret = pcap_dispatch(pCap, -1, flowCallBack,(u_char *)&flowTrack);
 			if (ret == -1) {
 				fprintf(stderr, "Exiting on pcap_dispatch: %s", pcap_geterr(pCap));
 				break;

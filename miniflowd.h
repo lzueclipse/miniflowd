@@ -35,8 +35,10 @@
 #include <syslog.h>
 #include <time.h>
 
+#define __STDC_FORMAT_MACROS 
 #include <inttypes.h>
 #include <pcap.h>
+
 
 /*
  * Capture length for libpcap: Must fit the link layer header, plus 
@@ -44,8 +46,9 @@
  */
 #define LIBPCAP_SNAPLEN_V4	96
 
+
 /*
- * Timeouts
+ * Timeouts, minimal value is 1, do not use 0
  */
 #define DEFAULT_TCP_TIMEOUT		3600
 #define DEFAULT_TCP_RST_TIMEOUT		5
@@ -85,7 +88,8 @@ struct Flow
 	int af;					/* Address family of flow */
 	struct in_addr addr[2];			/* Endpoint addresses */
 	uint16_t port[2];			/* Endpoint ports */
-	uint8_t tcpFlags[2];			/* Cumulative OR of flags */
+	uint8_t tcpRst[2];				/* tcp flags has rst */
+	uint8_t tcpFin[2];				/* tcp flags has fin*/
 	uint8_t protocol;			/* Protocol */
 
 	/* Per-flow statistics (all in _host_ byte order) */
@@ -145,16 +149,16 @@ struct FlowTrack
 {
 	/* The flows and their expiry events */
 	std::list<Flow> flowsList;	/* flow list */
-	std::list<Flow> expiresList;	/* expiries list */
 
 	uint64_t nextFlowSeq;		/* Next flow ID */
+	int      linkType;		/* Data link type */
 };
 
 
 /* Describes a datalink header and how to extract v4/v6 frames from it */
 struct DataLinkType
 {
-	int datalinkType;	/* BPF datalink type */
+	int dataLinkType;	/* BPF datalink type */
 	int skipLen;		/* Number of bytes to skip datalink header */
 	int frameTypeOffset;	/* Datalink frametype offset */
 	int frameTypeLen;	/* Datalink frametype length */
