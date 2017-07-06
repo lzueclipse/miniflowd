@@ -112,10 +112,6 @@ static int nextExpire(FlowTrack *flowTrack)
 	}
 
 	/* Cluster expiries*/
-	if ((fudge = expiresAt % DEFAULT_EXPIRY_INTERVAL) > 0)
-	{
-		expiresAt += DEFAULT_EXPIRY_INTERVAL - fudge;
-	}
 	if (expiresAt < now.tv_sec)
 	{
 		if(verboseFlag)
@@ -415,28 +411,28 @@ static const char * formatFlowBrief(Flow *flow)
 /* Format a flow in a verbose  way */
 static const char * formatFlow(Flow *flow)
 {
-	char addr1[64], addr2[64], stime[32], ftime[32];
+	char addr1[64], addr2[64], sTime[32], fTime[32];
 	static char buf[1024];
 
 	inet_ntop(flow->af, &flow->addr[0], addr1, sizeof(addr1));
 	inet_ntop(flow->af, &flow->addr[1], addr2, sizeof(addr2));
 
-	snprintf(stime, sizeof(ftime), "%s", formatTime(flow->flowStart.tv_sec));
-	snprintf(ftime, sizeof(ftime), "%s", formatTime(flow->flowLast.tv_sec));
+	snprintf(sTime, sizeof(sTime), "%s", formatTime(flow->flowStart.tv_sec));
+	snprintf(fTime, sizeof(fTime), "%s", formatTime(flow->flowLast.tv_sec));
 
 	snprintf(buf, sizeof(buf),  "seq:%" PRIu64" [%s]:%hu <> [%s]:%hu proto:%u,%s " \
 		"octets>:%" PRIu64 " packets>:%" PRIu64 " octets<:%" PRIu64 " packets<:%" PRIu64 \
-	    	"start:%s.%03ld finish:%s.%03ld tcp.rst>:%d tcp.rst<:%d  tcp.fin>:%d tcp.fin<%d reason:%s\n", \
+	    	" start:%s.%03ld finish:%s.%03ld tcp.rst>:%d tcp.fin>:%d  tcp.rst<:%d tcp.fin<%d reason:%s\n", \
 	    	flow->flowSeq,  \
 		addr1, ntohs(flow->port[0]), \
 		addr2, ntohs(flow->port[1]), \
 	    	(int)flow->protocol, protocolToStr(flow->protocol),\
 	    	flow->octets[0], flow->packets[0], \
 	    	flow->octets[1], flow->packets[1], \
-	    	stime, (flow->flowStart.tv_usec + 500) / 1000, \
-	    	ftime, (flow->flowLast.tv_usec + 500) / 1000, \
-		flow->tcpRst[0], flow->tcpRst[1], \
-		flow->tcpFin[0], flow->tcpFin[1], \
+	    	sTime, (flow->flowStart.tv_usec + 500) / 1000, \
+	    	fTime, (flow->flowLast.tv_usec + 500) / 1000, \
+		flow->tcpRst[0], flow->tcpFin[0], \
+		flow->tcpRst[1], flow->tcpFin[1], \
 		expireReason(flow->reason)
 	    );
 
@@ -600,6 +596,104 @@ static void flowCallBack(uint8_t *userData, const struct pcap_pkthdr* phdr, cons
 	}
 }
 
+void generateElasticScript(Flow *flow)
+{
+	char addr0[64], addr1[64], sTime[32], fTime[32];
+	char restfulBuf[2048];
+	char *ipv4Src = NULL, *ipv4Dst = NULL;
+	char hostname[1024];
+	uint16_t portSrc, portDst;
+	struct timeval now;
+	static char *url = "curl -XPOST 'http://localhost:9200/my_index/my_flows/?pretty' -H 'Content-Type: application/json' -d";
+	//ipv4 for now
+	if(flow->af != AF_INET)
+		return;    
+
+	gettimeofday(&now, NULL);
+	gethostname(hostname, sizeof(hostname));	
+
+	inet_ntop(flow->af, &flow->addr[0], addr0, sizeof(addr0));
+	inet_ntop(flow->af, &flow->addr[1], addr1, sizeof(addr1));
+
+	snprintf(sTime, sizeof(sTime), "%s", formatTime(flow->flowStart.tv_sec));
+	snprintf(fTime, sizeof(fTime), "%s", formatTime(flow->flowLast.tv_sec));
+	
+	if( flow->packets[0] > 0)
+	{
+		ipv4Src = addr0;
+		ipv4Dst = addr1;
+		portSrc = ntohs(flow->port[0]);
+		portDst = ntohs(flow->port[1]);
+		snprintf(restfulBuf, sizeof(restfulBuf), "%s \'\n" 
+"{\n " \
+"\t\"@timestamp\"            : %" PRIu64 ",\n " \
+"\t\"agent_host_name\"       : \"%s\",\n " \
+"\t\"ipv4_dst_addr\"         : \"%s\",\n " \
+"\t\"ipv4_src_addr\"         : \"%s\",\n " \
+"\t\"l4_dst_port\"           : %u,\n " \
+"\t\"l4_src_port\"           : %u,\n " \
+"\t\"has_tcp_fin\"           : %u,\n " \
+"\t\"has_tcp_rst\"           : %u,\n " \
+"\t\"protocol\"              : %u,\n " \
+"\t\"protocol_text\"         : \"%s\",\n " \
+"\t\"start_time\"        : %" PRIu64 ",\n " \
+"\t\"first_switched_text\"   : \"%s\",\n " \
+"\t\"last_switched\"         : %" PRIu64 ",\n " \
+"\t\"last_switched_text\"    : \"%s\",\n " \
+"\t\"in_bytes\"              : %u,\n " \
+"\t\"in_pkts\"               : %u\n " \
+"} \n\'",url, (uint64_t)(now.tv_sec) * 1000, hostname, ipv4_dst, ipv4_src, port_dst, port_src, flow->tcp_flags[0], \
+tcp_flags_text, tcp_flags_rst, flow->protocol, protocol_to_str(flow->protocol), (uint64_t)(flow->flow_start.tv_sec) * 1000 , stime, \
+(uint64_t)(flow->flow_last.tv_sec) * 1000, ftime, flow->octets[0], flow->packets[0]);
+	
+		logit(LOG_DEBUG,"%s\n",resetbuf);
+		system(resetbuf);
+	}
+	
+	if( flow->packets[1] > 0)
+	{
+		ipv4_src = addr1;
+		ipv4_dst = addr0;
+		port_src = ntohs(flow->port[1]);
+		port_dst = ntohs(flow->port[0]);
+		memset(tcp_flags_text, 0, sizeof(tcp_flags_text));
+		strcat(tcp_flags_text, tcp_flags_to_str(flow->tcp_flags[1]));
+		tcp_flags_rst = 0;
+		if(flow->tcp_flags[1] & TH_RST)
+		{
+			tcp_flags_rst = 1;
+		}
+		
+		snprintf(resetbuf, sizeof(resetbuf), "%s \'\n" 
+"{\n " \
+"\t\"@timestamp\"            : %" PRIu64 ",\n " \
+"\t\"agent_host_name\"       : \"%s\",\n " \
+"\t\"ipv4_dst_addr\"         : \"%s\",\n " \
+"\t\"ipv4_src_addr\"         : \"%s\",\n " \
+"\t\"l4_dst_port\"           : %u,\n " \
+"\t\"l4_src_port\"           : %u,\n " \
+"\t\"tcp_flags\"             : %u,\n " \
+"\t\"tcp_flags_text\"        : \"%s\",\n " \
+"\t\"has_tcp_rst\"           : %u,\n " \
+"\t\"protocol\"              : %u,\n " \
+"\t\"protocol_text\"         : \"%s\",\n " \
+"\t\"first_switched\"        : %" PRIu64 ",\n " \
+"\t\"first_switched_text\"   : \"%s\",\n " \
+"\t\"last_switched\"         : %" PRIu64 ",\n " \
+"\t\"last_switched_text\"    : \"%s\",\n " \
+"\t\"in_bytes\"              : %u,\n " \
+"\t\"in_pkts\"               : %u\n " \
+"} \n\'",url, (uint64_t)(now.tv_sec) * 1000, hostname, ipv4_dst, ipv4_src, port_dst, port_src, flow->tcp_flags[1], tcp_flags_text, tcp_flags_rst,\
+flow->protocol, protocol_to_str(flow->protocol), (uint64_t)(flow->flow_start.tv_sec) * 1000, stime, (uint64_t)(flow->flow_last.tv_sec) * 1000, \
+ftime, flow->octets[1], flow->packets[1]);
+	
+		logit(LOG_DEBUG,"%s\n",resetbuf);
+		system(resetbuf);
+	}
+
+#endif
+}
+
 static int flowExpire(FlowTrack *flowTrack)
 {
 	int numExpired = 0;
@@ -624,15 +718,21 @@ static int flowExpire(FlowTrack *flowTrack)
 			
 			if (elasticFlag)
 			{
-				//insertToElasticsearch(it);
+				generateElasticScript(&(*it));
 			}
 			
 			numExpired++;
 			//pop it
 			flowTrack->flowsList.pop_front();
+			//begin
 			it = flowTrack->flowsList.begin();
 		}
+		else
+		{
+			++it;
+		}
 	}
+	
 
 	return (numExpired);
 }
@@ -689,8 +789,8 @@ int main (int argc, char **argv)
 				break;
 			}
 		}
-
-		if(nextExpire(&flowTrack) == 0)
+		
+		if(nextExpire(&flowTrack)== 0)
 		{
 			flowExpire(&flowTrack);
 		}
