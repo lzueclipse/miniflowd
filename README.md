@@ -11,9 +11,9 @@ Building miniflowd should be as simple as typing:
 
 yum install libpcap-devel g++
 
-g++ -o miniflowd miniflowd.cpp
+sh ./build.sh
 
-./miniflowd -i eno16777984 -D
+./miniflowd -W <file name>
 
 #elasticsearch 
 ----------
@@ -260,3 +260,30 @@ curl -XGET 'localhost:9200/my_index/my_flows/_search?pretty' -H 'Content-Type: a
 }
 '
 
+#kibana
+-----------------
+
+1)rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
+
+2)edit /etc/yum.repos.d/ki.repo
+
+[kibana-5.x]
+name=Kibana repository for 5.x packages
+baseurl=https://artifacts.elastic.co/packages/5.x/yum
+gpgcheck=1
+gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch
+enabled=1
+autorefresh=1
+type=rpm-md
+
+3)yum install kibana
+
+systemctl daemon-reload
+
+systemctl enable kibana.service
+
+systemctl start kibana.service
+
+systemctl stop kibana.service
+
+4)import kibana-exports-template-2.json
