@@ -154,13 +154,13 @@ curl -XPUT 'localhost:9200/my_index?pretty' -H 'Content-Type: application/json' 
 				
 				"protocol_text": { "index": "not_analyzed", "type": "text" },
 				
-				"first_switched": { "index": "not_analyzed", "type": "date"},
+				"start_time": { "index": "not_analyzed", "type": "date"},
 				
-				"first_switched_text": { "index": "not_analyzed", "type": "text"},
+				"start_time_text": { "index": "not_analyzed", "type": "text"},
 
-				"last_switched": { "index": "not_analyzed", "type": "date"},
+				"end_time": { "index": "not_analyzed", "type": "date"},
 				
-				"last_switched_text": { "index": "not_analyzed", "type": "text"},
+				"end_time_text": { "index": "not_analyzed", "type": "text"},
 
 				"in_bytes": { "index": "not_analyzed", "type": "long" },
 
@@ -187,7 +187,7 @@ curl -XGET 'localhost:9200/my_index/my_flows/_search?pretty' -H 'Content-Type: a
 
   "sort": [
 
-    { "last_switched": "asc" }
+    { "end_time": "asc" }
 
   ]
 }
@@ -220,9 +220,9 @@ curl -XGET 'localhost:9200/my_index/my_flows/_search?pretty' -H 'Content-Type: a
 
       "should": [
 
-        { "match": { "first_switched": "1498624757" } },
+        { "match": { "start_time": "1498624757" } },
 
-        { "match": { "last_switched": "1498624762" } }
+        { "match": { "end_time": "1498624762" } }
 
       ]
 
@@ -242,9 +242,9 @@ curl -XGET 'localhost:9200/my_index/my_flows/_search?pretty' -H 'Content-Type: a
 
       "must": [
 
-        { "match": { "first_switched": "1498624757" } },
+        { "match": { "start_time": "1498624757" } },
 
-        { "match": { "last_switched": "1498624762" } }
+        { "match": { "end_time": "1498624762" } }
 
       ]
 

@@ -2,6 +2,7 @@
 
 
 static int verboseFlag = 0;            /* Debugging flag */
+static int elasticFlag = 0;            /* elasticsearch flag */
 
 
 /* Datalink types that we care about */
@@ -18,8 +19,8 @@ static void usage(void)
 {
 	fprintf(stderr, 
 "Usage: miniflowd [options] \n"
-"  -i 		      Specify interface to listen on\n"
 "  -D                 Debug mode\n"
+"  -E                 Elasticsearch mode\n"
 "  -h                 Display this help\n"
 "\n"
 "Valid timeout names and default values:\n"
@@ -55,10 +56,8 @@ static void setupPacketCapture(struct pcap **pCap, int *linkType)
 		fprintf(stderr, "Unsupported datalink type %d\n", *linkType);
 		exit(1);
 	}
-	if(verboseFlag)
-	{
-		fprintf(stdout, "linkType = %s\n", (*linkType == DLT_LINUX_SLL)?"DLT_LINUX_SLL":"DLT_EN10MB");
-	}
+		
+	fprintf(stdout, "linkType = %s\n", (*linkType == DLT_LINUX_SLL)?"DLT_LINUX_SLL":"DLT_EN10MB");
 }
 
 /*
@@ -98,13 +97,6 @@ static int nextExpire(FlowTrack *flowTrack)
 	//sort
 	(flowTrack->flowsList).sort(ExpiresCompare);
 	
-	printf("******************************\n");
-	std::list<Flow>::iterator it = flowTrack->flowsList.begin();
-	for(; it!=flowTrack->flowsList.end(); ++it)
-	{
-		printf("seq = %" PRIu64 "now=%u, flow->expiresAt = %u\n ", it->flowSeq, now.tv_sec, it->expiresAt);
-	}
-
 	expire = (flowTrack->flowsList).front();
 	
 	expiresAt = expire.expiresAt;
@@ -124,8 +116,6 @@ static int nextExpire(FlowTrack *flowTrack)
 	{
 		expiresAt += DEFAULT_EXPIRY_INTERVAL - fudge;
 	}
-	printf("seq = %" PRIu64 "now=%u, Min expiresAt = %u\n ", expire.flowSeq, now.tv_sec, expiresAt);
-	printf("******************************\n\n");
 	if (expiresAt < now.tv_sec)
 	{
 		if(verboseFlag)
@@ -387,7 +377,6 @@ static void flowUpdateExpiry(Flow *flow)
 		{
 			flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_TCP_FIN_TIMEOUT;
 			flow->reason = R_TCP_FIN;
-			printf("Fin, seq = %" PRIu64 ", expiresAt = %u\n", flow->flowSeq, flow->expiresAt);
 			goto out;
 		}
 
@@ -465,15 +454,11 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 	{
 		memcpy(&(tmpFlow.flowStart), receivedTime, sizeof(tmpFlow.flowStart));
 		tmpFlow.flowSeq = flowTrack->nextFlowSeq++;
-		if (verboseFlag)
-		{
-			fprintf(stdout, "Add Flow %s\n", formatFlowBrief(&tmpFlow));
-		}
+		fprintf(stdout, "Add Flow %s\n", formatFlowBrief(&tmpFlow));
 		memcpy(&(tmpFlow.flowLast), receivedTime, sizeof(tmpFlow.flowLast));
 		/* Must be non-zero (0 means expire immediately) */
 		tmpFlow.expiresAt = 1;
 		tmpFlow.reason = R_GENERAL;
-		printf("seq = %" PRIu64 "Add flow\n", tmpFlow.flowSeq);
 		flowUpdateExpiry(&tmpFlow);
 		flowTrack->flowsList.push_back(tmpFlow);
 	}
@@ -484,15 +469,16 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		it->octets[0] += tmpFlow.octets[0];
 		if(tmpFlow.tcpFin[0] == 1)
 			it->tcpFin[0] = 1; //keep it
-		if(
-		it->tcpRst[0] = tmpFlow.tcpRst[0];
+		if(tmpFlow.tcpRst[0] == 1)
+			it->tcpRst[0] = 1; //keep it
 
 		it->packets[1] += tmpFlow.packets[1];
 		it->octets[1] += tmpFlow.octets[1];
-		it->tcpFin[1] = tmpFlow.tcpFin[1];
-		it->tcpRst[1] = tmpFlow.tcpRst[1];
+		if(tmpFlow.tcpFin[1] == 1)
+			it->tcpFin[1] = 1; //keep it
+		if(tmpFlow.tcpRst[1] == 1)
+			it->tcpRst[1] = 1; //keep it
 		memcpy(&(it->flowLast), receivedTime, sizeof(it->flowLast));
-		printf("seq = %" PRIu64 "Update flow\n", it->flowSeq);
 		flowUpdateExpiry(&(*it));
 	}
 	
@@ -523,6 +509,99 @@ static void flowCallBack(uint8_t *userData, const struct pcap_pkthdr* phdr, cons
 	}
 }
 
+static char *expireReason(int reason)
+{
+	static char reasonBuf[64];
+	memset(reasonBuf, 0, sizeof(reasonBuf));
+	if(reason == R_GENERAL)
+	{
+		strcat(reasonBuf, "R_GENERAL");
+	}
+	else if(reason == R_TCP)
+	{
+		strcat(reasonBuf, "R_TCP");
+	}
+	else if(reason == R_TCP_RST)
+	{
+		strcat(reasonBuf, "R_TCP_RST");
+	}
+	else if(reason == R_TCP_FIN)
+	{
+		strcat(reasonBuf, "R_TCP_FIN");
+	}
+	else if(reason == R_UDP)
+	{
+		strcat(reasonBuf, "R_UDP");
+	}
+	else if(reason == R_ICMP)
+	{
+		strcat(reasonBuf, "R_ICMP");
+	}
+	else if(reason == R_MAXLIFE)
+	{
+		strcat(reasonBuf, "R_MAXLIFE");
+	}
+	else if(reason == R_OVERBYTES)
+	{
+		strcat(reasonBuf, "R_OVERFLOWS");
+	}
+	else if(reason == R_FLUSH)
+	{
+		strcat(reasonBuf, "R_FLUSH");
+	}
+	else
+	{
+		strcat(reasonBuf, "OTHERS");
+	}
+	
+}
+
+static int flowExpire(FlowTrack *flowTrack)
+{
+	int numExpired = 0;
+	struct timeval now;
+
+	gettimeofday(&now, NULL);
+	
+	//already sorted...
+	std::list<Flow>::iterator it = flowTrack->flowsList.begin();
+	for(; it!=flowTrack->flowsList.end(); ++it)
+	{
+		if(it->expiresAt == 0 || it->expiresAt < now.tv_sec)
+		{
+			/* Flow has expired */
+			if(it->flowStart.tv_sec - it->flowLast.tv_sec > DEFAULT_MAXIMUM_LIFETIME)
+			{
+				it->reason = R_MAXLIFE;
+			}
+			
+			num_expired++;
+			
+			if (verboseFlag)
+			{
+				fprintf("Expire flow seq:%" PRIu64 ", reason: %s\n", it->flowSeq, expireReason(it->reason) );
+			}
+			if (elasticFlag)
+			{
+				insertToElasticsearch(it);
+			}
+		}
+	}
+
+	/* Processing for expired flows */
+	if (num_expired > 0) {
+		for (i = 0; i < num_expired; i++) {
+			if (verbose_flag) {
+				logit(LOG_DEBUG, "EXPIRED: %s (%p)", 
+				    format_flow(expired_flows[i]),
+				    expired_flows[i]);
+			}
+	
+	}
+
+	return (num_expired);
+}
+
 int main (int argc, char **argv)
 {
 	int ch;
@@ -530,7 +609,7 @@ int main (int argc, char **argv)
 	int ret;
 	static FlowTrack flowTrack;
 	struct pollfd pollFd[1];
-	while ((ch = getopt(argc, argv, "hD")) != -1) 
+	while ((ch = getopt(argc, argv, "hDE")) != -1) 
 	{
 		switch (ch) 
 		{
@@ -539,7 +618,8 @@ int main (int argc, char **argv)
 			return (0);
 		case 'D':
 			verboseFlag = 1;
-			break;
+		case 'E':
+			elasticFlag = 1;
 		default:
 			fprintf(stderr, "Invalid commandline option.\n");
 			usage();
@@ -574,10 +654,10 @@ int main (int argc, char **argv)
 			}
 		}
 
-		//if(nextExpire(&flowTrack) == 0)
-		//{
-		//	printf("expire\n");
-		//}
+		if(nextExpire(&flowTrack) == 0)
+		{
+			flowExpire(&flowTrack);
+		}
 	
 	}
 	pcap_close(pCap);
