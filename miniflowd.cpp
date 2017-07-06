@@ -2,8 +2,7 @@
 
 
 static int verboseFlag = 0;            /* Debugging flag */
-static int elasticFlag = 0;            /* elasticsearch flag */
-
+FILE *curlFileHandler = NULL;
 
 /* Datalink types that we care about */
 static const struct DataLinkType dataLinkTypeArray[] = 
@@ -20,7 +19,7 @@ static void usage(void)
 	fprintf(stderr, 
 "Usage: miniflowd [options] \n"
 "  -D                 Debug mode\n"
-"  -E                 Elasticsearch mode\n"
+"  -W <file name>     Save the generated Elasticsearch curl script \n"
 "  -h                 Display this help\n"
 "\n"
 "Valid timeout names and default values:\n"
@@ -30,13 +29,11 @@ static void usage(void)
 "  udp     (default %6d)"
 "  icmp    (default %6d)"
 "  general (default %6d)\n"
-"  maxlife (default %6d)"
-"  expint  (default %6d)\n"
+"  maxlife (default %6d)\n"
 "\n" ,
 	    DEFAULT_TCP_TIMEOUT, DEFAULT_TCP_RST_TIMEOUT,
 	    DEFAULT_TCP_FIN_TIMEOUT, DEFAULT_UDP_TIMEOUT, DEFAULT_ICMP_TIMEOUT,
-	    DEFAULT_GENERAL_TIMEOUT, DEFAULT_MAXIMUM_LIFETIME,
-	    DEFAULT_EXPIRY_INTERVAL);
+	    DEFAULT_GENERAL_TIMEOUT, DEFAULT_MAXIMUM_LIFETIME);
 }
 
 static void setupPacketCapture(struct pcap **pCap, int *linkType)
@@ -422,7 +419,7 @@ static const char * formatFlow(Flow *flow)
 
 	snprintf(buf, sizeof(buf),  "seq:%" PRIu64" [%s]:%hu <> [%s]:%hu proto:%u,%s " \
 		"octets>:%" PRIu64 " packets>:%" PRIu64 " octets<:%" PRIu64 " packets<:%" PRIu64 \
-	    	" start:%s.%03ld finish:%s.%03ld tcp.rst>:%d tcp.fin>:%d tcp.rst<:%d tcp.fin<:%d reason:%s\n", \
+	    	" start:%s.%03ld finish:%s.%03ld tcp.rst>:%d tcp.fin>:%d tcp.rst<:%d tcp.fin<:%d reason:%s", \
 	    	flow->flowSeq,  \
 		addr1, ntohs(flow->port[0]), \
 		addr2, ntohs(flow->port[1]), \
@@ -646,6 +643,14 @@ void generateElasticScript(Flow *flow)
 flow->tcpRst[0], flow->protocol, protocolToStr(flow->protocol), (uint64_t)(flow->flowStart.tv_sec) * 1000 , sTime, \
 (uint64_t)(flow->flowLast.tv_sec) * 1000, fTime, flow->octets[0], flow->packets[0]);
 	
+		if(curlFileHandler != NULL)
+		{
+			fprintf(curlFileHandler, "%s", restfulBuf);
+		}
+		else
+		{
+			fprintf(stdout, "%s", restfulBuf);
+		}
 	}
 	
 	if( flow->packets[1] > 0)
@@ -676,8 +681,17 @@ flow->tcpRst[0], flow->protocol, protocolToStr(flow->protocol), (uint64_t)(flow-
 "} \n\'\n", url, (uint64_t)(now.tv_sec) * 1000, hostname, ipv4Dst, ipv4Src, portDst, portSrc, flow->tcpFin[1], \
 flow->tcpRst[1], flow->protocol, protocolToStr(flow->protocol), (uint64_t)(flow->flowStart.tv_sec) * 1000, sTime, \
 (uint64_t)(flow->flowLast.tv_sec) * 1000, fTime, flow->octets[1], flow->packets[1]);
-	
+		
+		if(curlFileHandler != NULL)
+		{
+			fprintf(curlFileHandler, "%s", restfulBuf);
+		}
+		else
+		{
+			fprintf(stdout, "%s", restfulBuf);
+		}
 	}
+	fflush(curlFileHandler);
 
 }
 
@@ -700,13 +714,9 @@ static int flowExpire(FlowTrack *flowTrack)
 				it->reason = R_MAXLIFE;
 			}
 			
-			
 			fprintf(stdout, "Del flow %s\n", formatFlow(&(*it)) );
 			
-			if (elasticFlag)
-			{
-				generateElasticScript(&(*it));
-			}
+			generateElasticScript(&(*it));
 			
 			numExpired++;
 			//pop it
@@ -731,7 +741,9 @@ int main (int argc, char **argv)
 	int ret;
 	static FlowTrack flowTrack;
 	struct pollfd pollFd[1];
-	while ((ch = getopt(argc, argv, "hDE")) != -1) 
+	extern char *optarg;
+	char *curlFileName;
+	while ((ch = getopt(argc, argv, "hDEW:")) != -1) 
 	{
 		switch (ch) 
 		{
@@ -740,8 +752,10 @@ int main (int argc, char **argv)
 			return (0);
 		case 'D':
 			verboseFlag = 1;
-		case 'E':
-			elasticFlag = 1;
+			break;
+		case 'W':
+			curlFileName = optarg;
+			curlFileHandler = fopen(curlFileName, "w+");
 			break;
 		default:
 			fprintf(stderr, "Invalid commandline option.\n");
@@ -784,6 +798,7 @@ int main (int argc, char **argv)
 	
 	}
 	pcap_close(pCap);
+   	fclose(curlFileHandler);
 
 	return(ret == 0 ? 0 : 1);
 }
