@@ -336,6 +336,66 @@ static const char * protocolToStr(uint8_t protocol)
 	return protobuf;
 }
 
+static char *expireReason(int reason)
+{
+	static char reasonBuf[64];
+	memset(reasonBuf, 0, sizeof(reasonBuf));
+	if(reason == R_GENERAL)
+	{
+		strcat(reasonBuf, "R_GENERAL");
+	}
+	else if(reason == R_TCP)
+	{
+		strcat(reasonBuf, "R_TCP");
+	}
+	else if(reason == R_TCP_RST)
+	{
+		strcat(reasonBuf, "R_TCP_RST");
+	}
+	else if(reason == R_TCP_FIN)
+	{
+		strcat(reasonBuf, "R_TCP_FIN");
+	}
+	else if(reason == R_UDP)
+	{
+		strcat(reasonBuf, "R_UDP");
+	}
+	else if(reason == R_ICMP)
+	{
+		strcat(reasonBuf, "R_ICMP");
+	}
+	else if(reason == R_MAXLIFE)
+	{
+		strcat(reasonBuf, "R_MAXLIFE");
+	}
+	else if(reason == R_OVERBYTES)
+	{
+		strcat(reasonBuf, "R_OVERFLOWS");
+	}
+	else if(reason == R_FLUSH)
+	{
+		strcat(reasonBuf, "R_FLUSH");
+	}
+	else
+	{
+		strcat(reasonBuf, "OTHERS");
+	}
+	
+}
+
+/* Format a time format */
+static const char * formatTime(time_t t)
+{
+	struct tm *tm;
+	static char buf[32];
+
+	tm = gmtime(&t);
+	strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", tm);
+
+	return (buf);
+
+}
+
 /* Format a flow in a brief way */
 static const char * formatFlowBrief(Flow *flow)
 {
@@ -349,6 +409,37 @@ static const char * formatFlowBrief(Flow *flow)
 	    addr1, ntohs(flow->port[0]), addr2, ntohs(flow->port[1]),
 	    (int)flow->protocol, protocolToStr(flow->protocol));
 	
+	return (buf);
+}
+
+/* Format a flow in a verbose  way */
+static const char * formatFlow(Flow *flow)
+{
+	char addr1[64], addr2[64], stime[32], ftime[32];
+	static char buf[1024];
+
+	inet_ntop(flow->af, &flow->addr[0], addr1, sizeof(addr1));
+	inet_ntop(flow->af, &flow->addr[1], addr2, sizeof(addr2));
+
+	snprintf(stime, sizeof(ftime), "%s", formatTime(flow->flowStart.tv_sec));
+	snprintf(ftime, sizeof(ftime), "%s", formatTime(flow->flowLast.tv_sec));
+
+	snprintf(buf, sizeof(buf),  "seq:%" PRIu64" [%s]:%hu <> [%s]:%hu proto:%u,%s " \
+		"octets>:%" PRIu64 " packets>:%" PRIu64 " octets<:%" PRIu64 " packets<:%" PRIu64 \
+	    	"start:%s.%03ld finish:%s.%03ld tcp.rst>:%d tcp.rst<:%d  tcp.fin>:%d tcp.fin<%d reason:%s\n", \
+	    	flow->flowSeq,  \
+		addr1, ntohs(flow->port[0]), \
+		addr2, ntohs(flow->port[1]), \
+	    	(int)flow->protocol, protocolToStr(flow->protocol),\
+	    	flow->octets[0], flow->packets[0], \
+	    	flow->octets[1], flow->packets[1], \
+	    	stime, (flow->flowStart.tv_usec + 500) / 1000, \
+	    	ftime, (flow->flowLast.tv_usec + 500) / 1000, \
+		flow->tcpRst[0], flow->tcpRst[1], \
+		flow->tcpFin[0], flow->tcpFin[1], \
+		expireReason(flow->reason)
+	    );
+
 	return (buf);
 }
 
@@ -509,53 +600,6 @@ static void flowCallBack(uint8_t *userData, const struct pcap_pkthdr* phdr, cons
 	}
 }
 
-static char *expireReason(int reason)
-{
-	static char reasonBuf[64];
-	memset(reasonBuf, 0, sizeof(reasonBuf));
-	if(reason == R_GENERAL)
-	{
-		strcat(reasonBuf, "R_GENERAL");
-	}
-	else if(reason == R_TCP)
-	{
-		strcat(reasonBuf, "R_TCP");
-	}
-	else if(reason == R_TCP_RST)
-	{
-		strcat(reasonBuf, "R_TCP_RST");
-	}
-	else if(reason == R_TCP_FIN)
-	{
-		strcat(reasonBuf, "R_TCP_FIN");
-	}
-	else if(reason == R_UDP)
-	{
-		strcat(reasonBuf, "R_UDP");
-	}
-	else if(reason == R_ICMP)
-	{
-		strcat(reasonBuf, "R_ICMP");
-	}
-	else if(reason == R_MAXLIFE)
-	{
-		strcat(reasonBuf, "R_MAXLIFE");
-	}
-	else if(reason == R_OVERBYTES)
-	{
-		strcat(reasonBuf, "R_OVERFLOWS");
-	}
-	else if(reason == R_FLUSH)
-	{
-		strcat(reasonBuf, "R_FLUSH");
-	}
-	else
-	{
-		strcat(reasonBuf, "OTHERS");
-	}
-	
-}
-
 static int flowExpire(FlowTrack *flowTrack)
 {
 	int numExpired = 0;
@@ -565,7 +609,7 @@ static int flowExpire(FlowTrack *flowTrack)
 	
 	//already sorted...
 	std::list<Flow>::iterator it = flowTrack->flowsList.begin();
-	for(; it!=flowTrack->flowsList.end(); ++it)
+	while(it!=flowTrack->flowsList.end())
 	{
 		if(it->expiresAt == 0 || it->expiresAt < now.tv_sec)
 		{
@@ -575,31 +619,22 @@ static int flowExpire(FlowTrack *flowTrack)
 				it->reason = R_MAXLIFE;
 			}
 			
-			num_expired++;
 			
-			if (verboseFlag)
-			{
-				fprintf("Expire flow seq:%" PRIu64 ", reason: %s\n", it->flowSeq, expireReason(it->reason) );
-			}
+			fprintf(stdout, "Del flow %s\n", formatFlow(&(*it)) );
+			
 			if (elasticFlag)
 			{
-				insertToElasticsearch(it);
+				//insertToElasticsearch(it);
 			}
+			
+			numExpired++;
+			//pop it
+			flowTrack->flowsList.pop_front();
+			it = flowTrack->flowsList.begin();
 		}
 	}
 
-	/* Processing for expired flows */
-	if (num_expired > 0) {
-		for (i = 0; i < num_expired; i++) {
-			if (verbose_flag) {
-				logit(LOG_DEBUG, "EXPIRED: %s (%p)", 
-				    format_flow(expired_flows[i]),
-				    expired_flows[i]);
-			}
-	
-	}
-
-	return (num_expired);
+	return (numExpired);
 }
 
 int main (int argc, char **argv)
@@ -620,6 +655,7 @@ int main (int argc, char **argv)
 			verboseFlag = 1;
 		case 'E':
 			elasticFlag = 1;
+			break;
 		default:
 			fprintf(stderr, "Invalid commandline option.\n");
 			usage();
