@@ -84,6 +84,21 @@ enum REASON
  */
 struct Flow 
 {
+	Flow()
+	{
+		af = 0;
+		memset(addr, 0, sizeof(addr));
+		memset(port, 0, sizeof(port));
+		memset(tcpRst, 0, sizeof(tcpRst));
+		memset(tcpFin, 0, sizeof(tcpFin));
+		protocol = 0;
+		flowSeq = 0;
+		memset(&flowStart, 0, sizeof(flowStart));
+		memset(&flowLast, 0, sizeof(flowLast));
+		memset(octets, 0, sizeof(octets));
+		memset(packets, 0, sizeof(packets));
+		expiresAt = 3600;
+	}
 	/* Flow identity (all are in network byte order) */
 	int af;					/* Address family of flow */
 	struct in_addr addr[2];			/* Endpoint addresses */

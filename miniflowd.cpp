@@ -97,14 +97,25 @@ static int nextExpire(FlowTrack *flowTrack)
 
 	//sort
 	(flowTrack->flowsList).sort(ExpiresCompare);
+	
+	printf("******************************\n");
+	std::list<Flow>::iterator it = flowTrack->flowsList.begin();
+	for(; it!=flowTrack->flowsList.end(); ++it)
+	{
+		printf("seq = %" PRIu64 "now=%u, flow->expiresAt = %u\n ", it->flowSeq, now.tv_sec, it->expiresAt);
+	}
 
 	expire = (flowTrack->flowsList).front();
 	
 	expiresAt = expire.expiresAt;
-
+		
 	/* Don't cluster urgent expiries */
 	if (expiresAt == 0 && (expire.reason == R_OVERBYTES || expire.reason == R_OVERFLOWS || expire.reason == R_FLUSH))
 	{
+		if(verboseFlag)
+		{
+			//fprintf(stdout, "Expire immediately\n");
+		}
 		return (0); /* Now */
 	}
 
@@ -113,16 +124,21 @@ static int nextExpire(FlowTrack *flowTrack)
 	{
 		expiresAt += DEFAULT_EXPIRY_INTERVAL - fudge;
 	}
-
+	printf("seq = %" PRIu64 "now=%u, Min expiresAt = %u\n ", expire.flowSeq, now.tv_sec, expiresAt);
+	printf("******************************\n\n");
 	if (expiresAt < now.tv_sec)
 	{
+		if(verboseFlag)
+		{
+			//fprintf(stdout, "Expire immediately\n");
+		}
 		return (0); /* Now */
 	}
 
 	ret = 999 + (expiresAt - now.tv_sec) * 1000;
 	if(verboseFlag)
 	{
-		fprintf(stdout, "nextExpire time = %u", ret );
+		//fprintf(stdout, "nextExpire time = %u ms\n", ret );
 	}
 	return (ret);
 }
@@ -346,6 +362,70 @@ static const char * formatFlowBrief(Flow *flow)
 	return (buf);
 }
 
+static void flowUpdateExpiry(Flow *flow)
+{
+
+	/* Flows over maximum life seconds */
+	if (flow->flowLast.tv_sec - flow->flowStart.tv_sec > DEFAULT_MAXIMUM_LIFETIME) 
+	{
+		flow->expiresAt = 0;
+		flow->reason = R_MAXLIFE;
+		goto out;
+	}
+	
+	if (flow->protocol == IPPROTO_TCP)
+	{
+		/* Reset TCP flows */
+		if ( (flow->tcpRst[0] == 1) || (flow->tcpRst[1] == 1 )) 
+		{
+			flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_TCP_RST_TIMEOUT;
+			flow->reason = R_TCP_RST;
+			goto out;
+		}
+		/* Finished TCP flows */
+		if ((flow->tcpFin[0] == 1) || (flow->tcpFin[1] == 1))
+		{
+			flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_TCP_FIN_TIMEOUT;
+			flow->reason = R_TCP_FIN;
+			printf("Fin, seq = %" PRIu64 ", expiresAt = %u\n", flow->flowSeq, flow->expiresAt);
+			goto out;
+		}
+
+		/* TCP flows */
+		flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_TCP_TIMEOUT;
+		flow->reason = R_TCP;
+		goto out;
+	}
+
+	if (flow->protocol == IPPROTO_UDP) 
+	{
+		/* UDP flows */
+		flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_UDP_TIMEOUT;
+		flow->reason = R_UDP;
+		goto out;
+	}
+
+	if (flow->af == AF_INET && flow->protocol == IPPROTO_ICMP) 
+	{ 
+		/* ICMP flows */
+		flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_ICMP_TIMEOUT;
+		flow->reason = R_ICMP;
+		goto out;
+	}
+
+	/* Everything else */
+	flow->expiresAt = flow->flowLast.tv_sec + DEFAULT_GENERAL_TIMEOUT;
+	flow->reason = R_GENERAL;
+
+ out:
+	if (flow->expiresAt != 0) 
+	{
+		flow->expiresAt = std::min(flow->expiresAt, (uint32_t)(flow->flowStart.tv_sec + DEFAULT_MAXIMUM_LIFETIME));
+	}
+
+}
+
+
 /*
  * Main per-packet processing function. Take a packet (provided by 
  * libpcap) and attempt to find a matching flow. If no such flow exists, 
@@ -393,6 +473,8 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		/* Must be non-zero (0 means expire immediately) */
 		tmpFlow.expiresAt = 1;
 		tmpFlow.reason = R_GENERAL;
+		printf("seq = %" PRIu64 "Add flow\n", tmpFlow.flowSeq);
+		flowUpdateExpiry(&tmpFlow);
 		flowTrack->flowsList.push_back(tmpFlow);
 	}
 	else
@@ -400,7 +482,9 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		/* Update flow statistics */
 		it->packets[0] += tmpFlow.packets[0];
 		it->octets[0] += tmpFlow.octets[0];
-		it->tcpFin[0] = tmpFlow.tcpFin[0];
+		if(tmpFlow.tcpFin[0] == 1)
+			it->tcpFin[0] = 1; //keep it
+		if(
 		it->tcpRst[0] = tmpFlow.tcpRst[0];
 
 		it->packets[1] += tmpFlow.packets[1];
@@ -408,6 +492,8 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		it->tcpFin[1] = tmpFlow.tcpFin[1];
 		it->tcpRst[1] = tmpFlow.tcpRst[1];
 		memcpy(&(it->flowLast), receivedTime, sizeof(it->flowLast));
+		printf("seq = %" PRIu64 "Update flow\n", it->flowSeq);
+		flowUpdateExpiry(&(*it));
 	}
 	
 	return 0;
@@ -481,37 +567,20 @@ int main (int argc, char **argv)
 		if(pollFd[0].revents != 0) 
 		{
 			ret = pcap_dispatch(pCap, -1, flowCallBack,(u_char *)&flowTrack);
-			if (ret == -1) {
+			if (ret == -1) 
+			{
 				fprintf(stderr, "Exiting on pcap_dispatch: %s", pcap_geterr(pCap));
 				break;
 			}
 		}
+
+		//if(nextExpire(&flowTrack) == 0)
+		//{
+		//	printf("expire\n");
+		//}
 	
 	}
 	pcap_close(pCap);
-
-#if 0
-	Flow tmp1, tmp2, tmp3;
-	tmp1.af=100;
-	tmp1.expiresAt=1;
-	tmp1.flowSeq=3;
-	tmp2.af=100;
-	tmp2.expiresAt=1;
-	tmp2.flowSeq=2;
-	tmp3.af=90;
-	tmp3.expiresAt=1;
-	tmp3.flowSeq=1;
-        std::list<Flow> expiresSet; 
-	expiresSet.push_back(tmp1);
-	expiresSet.push_back(tmp2);
-	expiresSet.push_back(tmp3);
-
-	expiresSet.sort(ExpiresCompare);
-	for(std::list<Flow>::iterator it = expiresSet.begin(); it!=expiresSet.end(); ++it)
-	{
-		std::cout << it->af <<", " << it->expiresAt << "," << it->flowSeq<< std::endl;
-	}
-#endif
 
 	return(ret == 0 ? 0 : 1);
 }
