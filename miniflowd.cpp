@@ -538,7 +538,7 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 	{
 		struct timeval now;
 		gettimeofday(&now, NULL);
-		if(now.tv_sec - recivedTime > 100)
+		if(now.tv_sec - receivedTime->tv_sec > 100)
 		{
 			//some times pcap time is not correct
 			memcpy(&(tmpFlow.flowStart), &now, sizeof(tmpFlow.flowStart));
@@ -575,7 +575,7 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		
 		struct timeval now;
 		gettimeofday(&now, NULL);
-		if(now.tv_sec - recivedTime > 100)a
+		if(now.tv_sec - receivedTime->tv_sec > 100)
 		{
 			memcpy(&(it->flowLast), &now, sizeof(it->flowLast));
 			//some times pcap time is not correct
