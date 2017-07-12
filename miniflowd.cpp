@@ -542,14 +542,15 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		{
 			//some times pcap time is not correct
 			memcpy(&(tmpFlow.flowStart), &now, sizeof(tmpFlow.flowStart));
+			memcpy(&(tmpFlow.flowLast), &now, sizeof(tmpFlow.flowLast));
 		}
 		else
 		{
 			memcpy(&(tmpFlow.flowStart), receivedTime, sizeof(tmpFlow.flowStart));
+			memcpy(&(tmpFlow.flowLast), receivedTime, sizeof(tmpFlow.flowLast));
 		}
 		tmpFlow.flowSeq = flowTrack->nextFlowSeq++;
 		fprintf(stdout, "Add Flow %s\n", formatFlowBrief(&tmpFlow));
-		memcpy(&(tmpFlow.flowLast), receivedTime, sizeof(tmpFlow.flowLast));
 		/* Must be non-zero (0 means expire immediately) */
 		tmpFlow.expiresAt = 1;
 		tmpFlow.reason = R_GENERAL;
@@ -577,8 +578,8 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 		gettimeofday(&now, NULL);
 		if(now.tv_sec - receivedTime->tv_sec > 100)
 		{
-			memcpy(&(it->flowLast), &now, sizeof(it->flowLast));
 			//some times pcap time is not correct
+			memcpy(&(it->flowLast), &now, sizeof(it->flowLast));
 		}
 		else
 		{
