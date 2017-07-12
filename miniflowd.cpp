@@ -536,7 +536,17 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 	/* If a matching flow does not exist, create and insert one */
 	if(!found)
 	{
-		memcpy(&(tmpFlow.flowStart), receivedTime, sizeof(tmpFlow.flowStart));
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		if(now.tv_sec - recivedTime > 100)
+		{
+			//some times pcap time is not correct
+			memcpy(&(tmpFlow.flowStart), &now, sizeof(tmpFlow.flowStart));
+		}
+		else
+		{
+			memcpy(&(tmpFlow.flowStart), receivedTime, sizeof(tmpFlow.flowStart));
+		}
 		tmpFlow.flowSeq = flowTrack->nextFlowSeq++;
 		fprintf(stdout, "Add Flow %s\n", formatFlowBrief(&tmpFlow));
 		memcpy(&(tmpFlow.flowLast), receivedTime, sizeof(tmpFlow.flowLast));
@@ -562,7 +572,18 @@ static int processPacket(FlowTrack *flowTrack, const uint8_t *pkt, int af, const
 			it->tcpFin[1] = 1; //keep it
 		if(tmpFlow.tcpRst[1] == 1)
 			it->tcpRst[1] = 1; //keep it
-		memcpy(&(it->flowLast), receivedTime, sizeof(it->flowLast));
+		
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		if(now.tv_sec - recivedTime > 100)a
+		{
+			memcpy(&(it->flowLast), &now, sizeof(it->flowLast));
+			//some times pcap time is not correct
+		}
+		else
+		{
+			memcpy(&(it->flowLast), receivedTime, sizeof(it->flowLast));
+		}
 		flowUpdateExpiry(&(*it));
 	}
 	
